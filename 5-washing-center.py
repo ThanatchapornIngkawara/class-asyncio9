@@ -4,8 +4,10 @@ import json
 import asyncio
 import aiomqtt
 from enum import Enum
+import sys
+import os
 
-student_id = "6300001"
+student_id = "6310301007"
 
 # State 
 S_OFF       = 'OFF'
@@ -59,6 +61,20 @@ async def actionWithinTime(w, client, nextstate, msg='', defaulttime=10):
         print(f"{time.ctime()} - [{w.SERIAL}-{w.STATE}] {msg} finished...")
         w.STATE = nextstate
 
+async def actionWithOUTTime(w, client, nextstate, msg='', defaulttime=10):
+    # fill water untill full level detected within 10 seconds if not full then timeout 
+    try:
+        async with asyncio.timeout(defaulttime):
+            await publish_message(w, client, "app", "get", "STATUS", w.STATE)
+            w.Task = asyncio.create_task(action(w, msg=msg))
+            await w.Task
+    except asyncio.CancelledError:
+        w.STATE = S_FAULT
+        print(f"{time.ctime()} - [{w.SERIAL}-{w.STATE}] {msg} timeout...{defaulttime} seconds")
+    except TimeoutError:
+        print(f"{time.ctime()} - [{w.SERIAL}-{w.STATE}] {msg} finished...")
+        w.STATE = nextstate
+
 async def waiter(w, event):
     print(f"{time.ctime()} - [{w.SERIAL}-{w.STATE}] Waiting next state...")
     await event.wait()
@@ -83,9 +99,6 @@ class WashingMachine:
 async def CoroWashingMachine(w, client):
 
     while True:
-        w.event = asyncio.Event()
-        waiter_task = asyncio.create_task(waiter(w, w.event))
-        await waiter_task
         
         if w.STATE == S_OFF:
             await publish_message(w, client, "app", "get", "STATUS", w.STATE)
@@ -114,16 +127,40 @@ async def CoroWashingMachine(w, client):
             await actionWithinTime(w, client, nextstate=S_WASH, msg='Heating water')
 
         # wash 10 seconds, if out of balance detected then fault
+        if w.STATE == S_WASH:
+            await publish_message(w, client, "app", "get", "STATUS", w.STATE)
+
+            # heat water untill  detected within 10 seconds if not full then timeout
+            print(f"{time.ctime()} - [{w.SERIAL}-{w.STATE}] washing...")
+            await actionWithOUTTime(w, client, nextstate=S_RINSE, msg='washing...')
 
         # rinse 10 seconds, if motor failure detect then fault
+        if w.STATE == S_RINSE:
+            await publish_message(w, client, "app", "get", "STATUS", w.STATE)
+
+            # heat water untill  detected within 10 seconds if not full then timeout
+            print(f"{time.ctime()} - [{w.SERIAL}-{w.STATE}] rinse...")
+            await actionWithOUTTime(w, client, nextstate=S_SPIN, msg='spin...')
 
         # spin 10 seconds, if motor failure detect then fault
+        if w.STATE == S_SPIN:
+            await publish_message(w, client, "app", "get", "STATUS", w.STATE)
 
+            # heat water untill  detected within 10 seconds if not full then timeout
+            print(f"{time.ctime()} - [{w.SERIAL}-{w.STATE}] spin...")
+            await actionWithOUTTime(w, client, nextstate=S_OFF, msg='spin...')
+        
+        if w.STATE == S_OFF:
+            await publish_message(w, client, "app", "get", "STATUS", w.STATE)
         # When washing is in FAULT state, wait until get FAULTCLEARED
+
 
         wait_next = round(5*random.random(),2)
         print(f"sleep {wait_next} seconds")
-        await asyncio.sleep(wait_next)
+        #await asyncio.sleep(wait_next)
+        w.event = asyncio.Event()
+        waiter_task = asyncio.create_task(waiter(w, w.event))
+        await waiter_task
             
 
 async def listen(w, client):
@@ -149,6 +186,10 @@ async def listen(w, client):
                     w.STATE = S_FULLLEVELDETECTED
                     if w.Task:
                         w.Task.cancel()
+                elif (w.STATE==S_HEATWATER and m_decode['name']=="STATUS" and m_decode['value']==S_TEMPERATUREREACHED):
+                    w.STATE = S_TEMPERATUREREACHED
+                    if w.Task:
+                        w.Task.cancel()
                 elif (m_decode['name']=="STATUS" and m_decode['value']==S_FAULT):
                     w.STATE = S_FAULT
                 elif (w.STATE==S_FAULT and m_decode['name']=="STATUS" and m_decode['value']==S_FAULTCLEARED):
@@ -166,4 +207,9 @@ async def main():
 
         await asyncio.gather(*l , *c)
 
+# Change to the "Selector" event loop if platform is Windows
+if sys.platform.lower() == "win32" or os.name.lower() == "nt":
+    from asyncio import set_event_loop_policy, WindowsSelectorEventLoopPolicy
+    set_event_loop_policy(WindowsSelectorEventLoopPolicy())
+# Run your async application as usual
 asyncio.run(main())
